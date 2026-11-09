@@ -1,0 +1,426 @@
+{
+  "name": "n8n RevOps Sentinel Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "aa270b6d-faed-4b96-8eec-b63f39c26560",
+      "name": "Daily Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "0c7465bd-e415-4946-b2d5-fff01fdf2837",
+      "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// RevOps Sentinel - Audit Configuration\n// Edit the CONFIG block, then everything downstream adapts.\n// ============================================================\nconst CONFIG = {\n  stagnantDays: 14,                 // open deals untouched longer than this are \"stagnant\"\n  leadLookbackDays: 30,             // inbound lead window used for the unassigned audit\n  inboundLifecycleStages: ['subscriber', 'lead', 'marketingqualifiedlead'],\n  weights: { deals: 0.6, leads: 0.4 },       // must sum to 1.0\n  thresholds: { healthy: 85, warning: 70 },  // score >= healthy = green, >= warning = yellow, else red\n  notifyAlways: true,               // false = only post to Slack when status is not Healthy\n  hubspotPortalId: '',              // optional Hub ID; enables clickable HubSpot record links\n  topN: 5                           // records listed per section in the Slack message\n};\n\nconst DAY = 24 * 60 * 60 * 1000;\nconst now = Date.now();\nconst staleCutoff = now - CONFIG.stagnantDays * DAY;\nconst leadSince = now - CONFIG.leadLookbackDays * DAY;\n\nconst dealProps = ['dealname', 'amount', 'dealstage', 'pipeline', 'hubspot_owner_id', 'notes_last_updated', 'createdate'];\nconst contactProps = ['firstname', 'lastname', 'email', 'company', 'lifecyclestage', 'hs_lead_status', 'createdate'];\n\nconst openDeal = { propertyName: 'hs_is_closed', operator: 'EQ', value: 'false' };\n\nconst queries = {\n  // 1) Open deals with no activity since the cutoff (OR: stale activity date, or never touched and older than cutoff)\n  staleDeals: {\n    filterGroups: [\n      { filters: [openDeal, { propertyName: 'notes_last_updated', operator: 'LT', value: String(staleCutoff) }] },\n      { filters: [openDeal, { propertyName: 'notes_last_updated', operator: 'NOT_HAS_PROPERTY' }, { propertyName: 'createdate', operator: 'LT', value: String(staleCutoff) }] }\n    ],\n    sorts: [{ propertyName: 'notes_last_updated', direction: 'ASCENDING' }],\n    properties: dealProps,\n    limit: 100\n  },\n  // 2) Denominator: all open deals (limit 1, we only need `total`)\n  openDeals: {\n    filterGroups: [{ filters: [openDeal] }],\n    properties: ['dealname'],\n    limit: 1\n  },\n  // 3) Inbound leads in the lookback window with no owner\n  unassignedLeads: {\n    filterGroups: [{\n      filters: [\n        { propertyName: 'hubspot_owner_id', operator: 'NOT_HAS_PROPERTY' },\n        { propertyName: 'createdate', operator: 'GTE', value: String(leadSince) },\n        { propertyName: 'lifecyclestage', operator: 'IN', values: CONFIG.inboundLifecycleStages }\n      ]\n    }],\n    sorts: [{ propertyName: 'createdate', direction: 'ASCENDING' }],\n    properties: contactProps,\n    limit: 100\n  },\n  // 4) Denominator: all inbound leads in the lookback window\n  inboundLeads: {\n    filterGroups: [{\n      filters: [\n        { propertyName: 'createdate', operator: 'GTE', value: String(leadSince) },\n        { propertyName: 'lifecyclestage', operator: 'IN', values: CONFIG.inboundLifecycleStages }\n      ]\n    }],\n    properties: ['email'],\n    limit: 1\n  }\n};\n\nreturn [{ json: { config: CONFIG, now, staleCutoff, leadSince, queries } }];\n"
+      },
+      "id": "77ab38a2-8ce7-451a-8de0-652d7b1ba88c",
+      "name": "Build Audit Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.queries.staleDeals) }}",
+        "options": {}
+      },
+      "id": "857aa5c2-ee2d-46b3-b4fe-dccf8dcfabf1",
+      "name": "Query Stagnant Deals",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        -120
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "HubSpot Private App Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.queries.openDeals) }}",
+        "options": {}
+      },
+      "id": "1f85db7f-a711-47c6-808f-648a19876cb5",
+      "name": "Query Open Deals Total",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        60
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "HubSpot Private App Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.queries.unassignedLeads) }}",
+        "options": {}
+      },
+      "id": "2527a0db-401d-42f3-a56a-87ab3f4d2cd6",
+      "name": "Query Unassigned Leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "HubSpot Private App Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.queries.inboundLeads) }}",
+        "options": {}
+      },
+      "id": "bae17005-00b6-4d0a-a4c5-65a2f5fc13d8",
+      "name": "Query Inbound Leads Total",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        420
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "HubSpot Private App Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "numberInputs": 4
+      },
+      "id": "7839cd9b-b8ac-4a70-83c2-ee86fb63d131",
+      "name": "Sync Parallel Queries",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        840,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// RevOps Sentinel - Scoring & Aggregation\n// Combines the four parallel HubSpot queries into one health report.\n// ============================================================\nconst cfgItem = $('Build Audit Config').first().json;\nconst C = cfgItem.config;\nconst now = cfgItem.now;\nconst portal = C.hubspotPortalId;\n\nconst stale = $('Query Stagnant Deals').first().json;\nconst open = $('Query Open Deals Total').first().json;\nconst unassigned = $('Query Unassigned Leads').first().json;\nconst inbound = $('Query Inbound Leads Total').first().json;\n\nconst staleCount = Number(stale.total ?? 0);\nconst openCount = Number(open.total ?? 0);\nconst unCount = Number(unassigned.total ?? 0);\nconst inboundCount = Number(inbound.total ?? 0);\n\n// ---- helpers ----\nconst ratio = (a, b) => (b > 0 ? Math.min(a / b, 1) : 0);\nconst pct = (r) => `${Math.round(r * 100)}%`;\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst toMs = (v) => {\n  if (v === null || v === undefined || v === '') return null;\n  const n = /^\\d+$/.test(String(v)) ? Number(v) : Date.parse(v);\n  return Number.isFinite(n) ? n : null;\n};\nconst daysAgo = (ms) => (ms ? Math.max(0, Math.floor((now - ms) / 86400000)) : null);\nconst money = (v) => {\n  if (v === null || v === undefined || v === '') return 'no amount';\n  const n = Number(v);\n  return Number.isFinite(n) ? '$' + n.toLocaleString('en-US', { maximumFractionDigits: 0 }) : 'no amount';\n};\nconst link = (url, label) => (url ? `<${url}|${esc(label)}>` : esc(label));\n\n// ---- records ----\nconst staleDeals = (stale.results || [])\n  .map((d) => {\n    const p = d.properties || {};\n    const last = toMs(p.notes_last_updated) ?? toMs(p.createdate);\n    return {\n      id: d.id,\n      name: p.dealname || '(unnamed deal)',\n      amount: p.amount,\n      stage: p.dealstage,\n      ownerId: p.hubspot_owner_id || null,\n      daysUntouched: daysAgo(last),\n      url: portal ? `https://app.hubspot.com/contacts/${portal}/record/0-3/${d.id}` : null\n    };\n  })\n  .sort((a, b) => (b.daysUntouched ?? 0) - (a.daysUntouched ?? 0));\n\nconst unassignedLeads = (unassigned.results || [])\n  .map((c) => {\n    const p = c.properties || {};\n    const name = [p.firstname, p.lastname].filter(Boolean).join(' ') || p.email || '(no name)';\n    return {\n      id: c.id,\n      name,\n      email: p.email || null,\n      company: p.company || null,\n      stage: p.lifecyclestage || null,\n      ageDays: daysAgo(toMs(p.createdate)),\n      url: portal ? `https://app.hubspot.com/contacts/${portal}/record/0-1/${c.id}` : null\n    };\n  })\n  .sort((a, b) => (b.ageDays ?? 0) - (a.ageDays ?? 0));\n\n// ---- health score (100 = perfect) ----\nconst staleRatio = ratio(staleCount, openCount);\nconst unassignedRatio = ratio(unCount, inboundCount);\nconst dealPenalty = staleRatio * 100 * C.weights.deals;\nconst leadPenalty = unassignedRatio * 100 * C.weights.leads;\nconst score = Math.max(0, Math.min(100, Math.round(100 - dealPenalty - leadPenalty)));\n\nlet status, emoji;\nif (score >= C.thresholds.healthy) { status = 'Healthy'; emoji = '🟢'; }\nelse if (score >= C.thresholds.warning) { status = 'Needs Attention'; emoji = '🟡'; }\nelse { status = 'Critical'; emoji = '🔴'; }\n\nconst shouldNotify = C.notifyAlways || status !== 'Healthy';\nconst runDate = new Date(now).toISOString().slice(0, 10);\n\n// ---- Slack Block Kit ----\nconst dealLines = staleDeals.slice(0, C.topN).map((d, i) =>\n  `${i + 1}. ${link(d.url, d.name)} · ${money(d.amount)} · *${d.daysUntouched ?? '?'}d* untouched${d.ownerId ? '' : ' · _no owner_'}`\n);\nconst leadLines = unassignedLeads.slice(0, C.topN).map((l, i) =>\n  `${i + 1}. ${link(l.url, l.name)}${l.company ? ' · ' + esc(l.company) : ''} · *${l.ageDays ?? '?'}d* waiting`\n);\n\nconst dealsText = (dealLines.length ? dealLines.join('\\n') : '_None. Pipeline is moving._') +\n  (staleCount > dealLines.length ? `\\n_...and ${staleCount - dealLines.length} more_` : '');\nconst leadsText = (leadLines.length ? leadLines.join('\\n') : '_None. Every inbound lead has an owner._') +\n  (unCount > leadLines.length ? `\\n_...and ${unCount - leadLines.length} more_` : '');\n\nconst blocks = [\n  { type: 'header', text: { type: 'plain_text', text: `${emoji} RevOps Sentinel: HubSpot Health ${score}/100`, emoji: true } },\n  {\n    type: 'section',\n    fields: [\n      { type: 'mrkdwn', text: `*Status*\\n${status}` },\n      { type: 'mrkdwn', text: `*Health Score*\\n${score}/100` },\n      { type: 'mrkdwn', text: `*Stagnant deals (>${C.stagnantDays}d)*\\n${staleCount} of ${openCount} open (${pct(staleRatio)})` },\n      { type: 'mrkdwn', text: `*Unassigned inbound leads*\\n${unCount} of ${inboundCount} (${pct(unassignedRatio)}), last ${C.leadLookbackDays}d` }\n    ]\n  },\n  { type: 'divider' },\n  { type: 'section', text: { type: 'mrkdwn', text: `*Stagnant deals, oldest first*\\n${dealsText}` } },\n  { type: 'section', text: { type: 'mrkdwn', text: `*Unassigned inbound leads, longest waiting first*\\n${leadsText}` } },\n  {\n    type: 'context',\n    elements: [{ type: 'mrkdwn', text: `Run ${runDate} · deal penalty -${dealPenalty.toFixed(1)} · lead penalty -${leadPenalty.toFixed(1)} · n8n-revops-sentinel-monitor` }]\n  }\n];\n\nreturn [{\n  json: {\n    runDate,\n    score,\n    status,\n    shouldNotify,\n    metrics: {\n      openDeals: openCount,\n      stagnantDeals: staleCount,\n      stagnantRatio: Number(staleRatio.toFixed(4)),\n      inboundLeads: inboundCount,\n      unassignedLeads: unCount,\n      unassignedRatio: Number(unassignedRatio.toFixed(4)),\n      dealPenalty: Number(dealPenalty.toFixed(2)),\n      leadPenalty: Number(leadPenalty.toFixed(2))\n    },\n    topStagnantDeals: staleDeals.slice(0, C.topN),\n    topUnassignedLeads: unassignedLeads.slice(0, C.topN),\n    slackText: `${emoji} HubSpot health ${score}/100 (${status}): ${staleCount} stagnant deals, ${unCount} unassigned inbound leads`,\n    slackBlocks: JSON.stringify({ blocks })\n  }\n}];\n"
+      },
+      "id": "c9c8a4b3-2f70-43a8-897d-759f8df47f21",
+      "name": "Score & Aggregate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "02aa9051-98aa-447a-8989-45eaba3a1f29",
+              "leftValue": "={{ $json.shouldNotify }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dde80472-9f9a-4994-8bd7-84d44f1d5812",
+      "name": "Should Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1340,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SLACK_CHANNEL_ID",
+          "mode": "id"
+        },
+        "messageType": "block",
+        "blocksUi": "={{ $json.slackBlocks }}",
+        "text": "={{ $json.slackText }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "07fb7f88-0359-42fa-af2a-01cec8080aab",
+      "name": "Post Executive Alert to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1600,
+        60
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Slack Bot Token"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "096b287d-b8df-455f-8b41-071a23fee0e8",
+      "name": "No Alert Needed",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1600,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## RevOps Sentinel\nDaily HubSpot health audit.\n\n**Before activating**\n1. Attach a HubSpot Private App credential to the 4 query nodes\n2. Attach a Slack credential and set the channel ID in the Slack node\n3. Tune thresholds in **Build Audit Config**\n4. Run the Manual Test Trigger once",
+        "height": 260,
+        "width": 300
+      },
+      "id": "d181048a-65bc-4578-a9dd-61a3b9be177f",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -340
+      ]
+    }
+  ],
+  "connections": {
+    "Daily Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Audit Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Audit Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Audit Config": {
+      "main": [
+        [
+          {
+            "node": "Query Stagnant Deals",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Query Open Deals Total",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Query Unassigned Leads",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Query Inbound Leads Total",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Stagnant Deals": {
+      "main": [
+        [
+          {
+            "node": "Sync Parallel Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Open Deals Total": {
+      "main": [
+        [
+          {
+            "node": "Sync Parallel Queries",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Query Unassigned Leads": {
+      "main": [
+        [
+          {
+            "node": "Sync Parallel Queries",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Query Inbound Leads Total": {
+      "main": [
+        [
+          {
+            "node": "Sync Parallel Queries",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Sync Parallel Queries": {
+      "main": [
+        [
+          {
+            "node": "Score & Aggregate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score & Aggregate": {
+      "main": [
+        [
+          {
+            "node": "Should Alert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Alert?": {
+      "main": [
+        [
+          {
+            "node": "Post Executive Alert to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Alert Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
