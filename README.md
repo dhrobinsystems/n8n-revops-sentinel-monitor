@@ -1,5 +1,7 @@
 # n8n-revops-sentinel-monitor
 
+![n8n RevOps Sentinel Monitor Architecture](assets/n8n-revops-sentinel-monitor-architecture.png)
+
 An automated **n8n health-monitoring watchdog for HubSpot CRM**. Every day it audits your pipeline and inbound lead flow, computes a single 0-100 database health score, and posts one consolidated executive alert to Slack.
 
 Built with 100% native n8n nodes. No community nodes, no external services beyond HubSpot and Slack.
